@@ -19,11 +19,9 @@ parser.add_argument(
 parser.add_argument(
     "--no-label",
     action="store_const",
-    type=bool,
     default=False,
     const=True,
     dest="label",
-    nargs=0,
     help="Disables the label with the seed"
 )
 parser.add_argument(
@@ -44,8 +42,20 @@ args = parser.parse_args()
 
 # endregion
 
+def octaveNoise(noise, x, y, octaves):
+    total = noise.noise2d(x, y)
+    freq = 1
+    amp = 1
+    max = 1
+    for i in range(octaves):
+        freq *= 2
+        amp *= 0.5
+        max += amp
+        total += noise.noise2d(x * freq, y * freq) * amp
+    return total/max
+
 class RegionProcessor(threading.Thread):
-    def __init__(self, startX, startY, endX, endY, totalWidth, totalHeight, tnoise, mnoise, output):
+    def __init__(self, startX, startY, endX, endY, totalWidth, totalHeight, tnoise, mnoise, outputImg):
         self.startX = startX
         self.startY = startY
         self.endX = endX
@@ -59,22 +69,24 @@ class RegionProcessor(threading.Thread):
         self.terrain = Image.new("L", (self.width, self.height))
         self.moisture = Image.new("L", (self.width, self.height))
         self.world = Image.new("RGB", (self.width, self.height))
-        self.out = output
-        super.__init__(self)
+        self.outImg = outputImg
+        super().__init__()
 
     def run(self):
         self.genNoise()
         self.addSlope()
         self.addColor()
-        self.out[(self.startX, self.startY)] = self.world
+        self.outImg.paste(self.world, (self.startX, self.startY))
 
     def genNoise(self):
         tdraw = ImageDraw.Draw(self.terrain)
         mdraw = ImageDraw.Draw(self.moisture)
         for x in range(self.width):
             for y in range(self.height):
-                tdraw.point((x, y), self.tnoise.noise2d(x + self.startX, y + self.startY))
-                mdraw.point((x, y), self.mnoise.noise2d(x + self.startX, y + self.startY))
+                e = min(max(math.floor(octaveNoise(self.tnoise, (x + self.startX) / 100, (y + self.startY) / 100, 8)*127 + 127), 0), 255)
+                m = min(max(math.floor(octaveNoise(self.mnoise, (x + self.startX) / 50, (y + self.startY) / 50, 4)*127 + 127), 0), 255)
+                tdraw.point((x, y), e)
+                mdraw.point((x, y), m)
         del tdraw, mdraw
 
     def addSlope(self):
@@ -82,8 +94,8 @@ class RegionProcessor(threading.Thread):
         tdraw = ImageDraw.Draw(self.terrain)
         for x in range(self.width):
             for y in range(self.height):
-                dist = math.sqrt(((self.totalWidth - (x + self.startX)) / 2)**2 + (self.totalHeight - (y + self.startY) / 2)**2)
-                tdraw.point((x, y), self.terrain.getpixel((x, y)) - ((dist / maxDist) * 127))
+                dist = math.sqrt(((x + self.startX) - self.totalWidth/2)**2 + ((y + self.startY) - self.totalHeight/2)**2)
+                tdraw.point((x, y), self.terrain.getpixel((x, y)) - math.floor(dist / maxDist * 200))
         del tdraw
 
     def addColor(self):
@@ -129,43 +141,42 @@ if __name__ == "__main__":
     n = math.ceil(math.sqrt(x))
     while x % n != 0:
         n += 1
-    threadDimX = n
-    threadDimY = x / n
+    threadDimX = int(n)
+    threadDimY = int(x / n)
 
     if 480 % threadDimX != 0 or 480 % threadDimY != 0:
         print("Error: Thread count not divisible into resolution (480x480)")
         raise SystemExit
-    threadSize = (480 / threadDimX, 480 / threadDimY)
+    threadSize = (int(480 / threadDimX), int(480 / threadDimY))
 
+    st = time.time()
     # Create generator threads
     tnoise = OpenSimplex(seed=args.seed)
     random.seed(args.seed)
     mnoise = OpenSimplex(seed=random.randint(1, 10000))
     pool = []
-    outputs = {}
+    finalImg = Image.new("RGB", (480, 480))
     for x in range(threadDimX):
         for y in range(threadDimY):
             pool.append(RegionProcessor(
                 threadSize[0]*x, threadSize[1]*y,
-                threadSize[0]*(x+1)-1, threadSize[1]*(y+1)-1,
+                threadSize[0]*(x+1), threadSize[1]*(y+1),
                 480, 480,
                 tnoise, mnoise,
-                outputs
+                finalImg
             ))
+    print(time.time()-st)
 
     # Start threads
     for thread in pool:
+        st = time.time()
         thread.start()
+        print(time.time()-st)
 
     # Wait for threads to finish
     while [x.is_alive() for x in pool].count(True) > 0:
         print("{} thread(s) are done".format([x.is_alive() for x in pool].count(False)), end="\r")
     print()
-
-    # Stitch together final image
-    finalImg = Image.new("RGB", (480, 480))
-    for pos, img in outputs.items():
-        finalImg.paste(img, pos)
 
     # Add label
     if args.label:
@@ -174,6 +185,6 @@ if __name__ == "__main__":
 
     # Save image
     with open(args.filename, "wb") as f:
-        finalImg.save(f)
+        finalImg.save(f, "PNG")
 
-    print("Done! Took {} seconds.".format(time.time() - startTime))
+    print("Done! Took {:0.2f} seconds.".format(time.time() - startTime))
